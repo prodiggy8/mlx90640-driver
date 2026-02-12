@@ -8,7 +8,7 @@ LIBS = -lm -ltiff `pkg-config --libs opencv4`
 TARGET = mlxget
 OBJS = tool.o MLX90640_API.o MLX90640_I2C_Driver.o
 
-all: $(TARGET)
+all: $(TARGET) dir
 
 $(TARGET): $(OBJS)
 	$(CXX) $(OBJS) -o $(TARGET) $(LIBS)
@@ -21,6 +21,9 @@ MLX90640_I2C_Driver.o: MLX90640_I2C_Driver.c
 
 tool.o: tool.cpp
 	$(CXX) $(CXXFLAGS) -c tool.cpp
+
+dir:
+	mkdir -p frames
 
 clean:
 	rm -f *.o $(TARGET)
