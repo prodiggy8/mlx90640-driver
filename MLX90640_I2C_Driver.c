@@ -1,6 +1,5 @@
 /**
  * MLX90640 I2C Driver for Jetson Nano
- * Implements Repeated Start using Linux I2C-dev ioctl
  */
 
 #include <stdio.h>

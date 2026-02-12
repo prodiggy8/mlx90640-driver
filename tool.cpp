@@ -4,7 +4,6 @@
 #include <signal.h>
 #include <unistd.h>
 
-// Melexis API and Driver headers
 extern "C" {
 	#include "MLX90640_API.h"
 	#include "MLX90640_I2C_Driver.h"
@@ -57,7 +56,7 @@ int main(int argc, char** argv) {
     }
 
     // 3. Configure Sensor Refresh Rate
-    MLX90640_SetRefreshRate(MLX_ADDR, 0x04); // 0x03 = 4Hz, 0x04 = 8Hz
+    MLX90640_SetRefreshRate(MLX_ADDR, 0x05); // 0x03 = 4Hz, 0x04 = 8Hz
 
     printf("Calibration Loaded. Entering Main Loop...\n");
     printf("Press Ctrl+C to exit.\n");
