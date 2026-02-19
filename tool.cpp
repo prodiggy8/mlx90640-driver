@@ -78,7 +78,7 @@ int main(int argc, char** argv) {
         }
 		
 		// CRITICAL SECTION
-		sigprocmask(SIG_BLOCK, &x, &old_mask);
+		sigprocmask(SIG_BLOCK, &x, &old_x);
 
         if (MLX90640_GetFrameData(MLX_ADDR, frameData) >= 0) {
 			float Ta = MLX90640_GetTa(frameData, &params);
@@ -110,7 +110,7 @@ int main(int argc, char** argv) {
             if (save_color) {
                 save_thermal_tiff_color(colorFrame, capture_time);
             } else {
-                save_thermal_tiff_raw(mlx90640To, capture_time);
+                save_thermal_json(mlx90640To, capture_time);
             }
         }
 
@@ -180,6 +180,11 @@ void save_thermal_tiff_color(cv::Mat &colorFrame, time_t timestamp) {
 void save_thermal_json(float data[768], time_t timestamp) {
     char filename[64];
     char meta_time[20];
+	float avg = 0;
+
+	for (int i = 0; i < 768; i++) avg += data[i];
+	avg /= 768;	
+
     struct tm *t = localtime(&timestamp);
 
     // Create filename and format timestamp string
@@ -196,8 +201,7 @@ void save_thermal_json(float data[768], time_t timestamp) {
     fprintf(f, "{\n");
     fprintf(f, "  \"timestamp\": \"%s\",\n", meta_time);
     fprintf(f, "  \"unix_time\": %ld,\n", (long)timestamp);
-    fprintf(f, "  \"width\": 32,\n");
-    fprintf(f, "  \"height\": 24,\n");
+    fprintf(f, "  \"avg\": %f,\n", avg);
     fprintf(f, "  \"data\": [\n");
 
     // Write the 768 pixel values
