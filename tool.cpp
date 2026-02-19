@@ -22,9 +22,17 @@ void handle_signal(int sig) { stop_signal = true; }
 // Forward declarations for your saving functions
 void save_thermal_tiff_raw(float data[768], time_t timestamp);
 void save_thermal_tiff_color(cv::Mat &colorFrame, time_t timestamp);
+void save_thermal_json(float data[768], time_t timestamp);
 
 int main(int argc, char** argv) {
     signal(SIGINT, handle_signal);
+	
+	sigset_t x;
+	sigset_t old_x;
+
+	sigemptyset(&x);
+	sigaddset(&x, SIGINT);
+	sigaddset(&x, SIGTERM);
 
     int seconds = -1;       // -s: undefined defaults to continuous
     bool save_color = false; // -c
@@ -68,11 +76,18 @@ int main(int argc, char** argv) {
         if (seconds > 0 && difftime(time(NULL), start_time) >= seconds) {
             break;
         }
+		
+		// CRITICAL SECTION
+		sigprocmask(SIG_BLOCK, &x, &old_mask);
 
-        if (MLX90640_GetFrameData(MLX_ADDR, frameData) < 0) continue;
+        if (MLX90640_GetFrameData(MLX_ADDR, frameData) >= 0) {
+			float Ta = MLX90640_GetTa(frameData, &params);
+			MLX90640_CalculateTo(frameData, &params, 0.95, Ta - 8.0, mlx90640To);
+		} else {
+			continue;
+		}
 
-        float Ta = MLX90640_GetTa(frameData, &params);
-        MLX90640_CalculateTo(frameData, &params, 0.95, Ta - 8.0, mlx90640To);
+		sigprocmask(SIG_SETMASK, &old_x, NULL);
 
         // Map to OpenCV
         cv::Mat frame(24, 32, CV_32FC1, mlx90640To);
@@ -160,4 +175,39 @@ void save_thermal_tiff_color(cv::Mat &colorFrame, time_t timestamp) {
         TIFFWriteScanline(out, rgbRow.data, y, 0);
     }
     TIFFClose(out);
+}
+
+void save_thermal_json(float data[768], time_t timestamp) {
+    char filename[64];
+    char meta_time[20];
+    struct tm *t = localtime(&timestamp);
+
+    // Create filename and format timestamp string
+    sprintf(filename, "frames/data_capture_%ld.json", (long)timestamp);
+    strftime(meta_time, sizeof(meta_time), "%Y-%m-%d %T", t);
+
+    FILE *f = fopen(filename, "w");
+    if (!f) {
+        perror("Failed to open JSON file");
+        return;
+    }
+
+    // Start JSON object
+    fprintf(f, "{\n");
+    fprintf(f, "  \"timestamp\": \"%s\",\n", meta_time);
+    fprintf(f, "  \"unix_time\": %ld,\n", (long)timestamp);
+    fprintf(f, "  \"width\": 32,\n");
+    fprintf(f, "  \"height\": 24,\n");
+    fprintf(f, "  \"data\": [\n");
+
+    // Write the 768 pixel values
+    for (int i = 0; i < 768; i++) {
+        // format to 2 decimal places to save space, change to %.4f if higher precision is needed
+        fprintf(f, "    %.2f%s", data[i], (i < 767 ? ",\n" : "\n"));
+    }
+
+    fprintf(f, "  ]\n");
+    fprintf(f, "}\n");
+
+    fclose(f);
 }
