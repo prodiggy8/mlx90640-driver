@@ -1,3 +1,4 @@
 *.o
 mlxget
 tool.old.cpp
+frames
