@@ -26,10 +26,10 @@ static const int NUM_CAMS = 2;
 bool stop_signal = false;
 void handle_signal(int sig) { stop_signal = true; }
 
-// Forward declarations (timestamp_ms = milliseconds since epoch, cam_id = 1 or 2 for filename)
-void save_thermal_tiff_raw(float data[768], int64_t timestamp_ms, int cam_id);
-void save_thermal_tiff_color(cv::Mat &colorFrame, int64_t timestamp_ms, int cam_id);
-void save_thermal_json(float data[768], int64_t timestamp_ms, int cam_id);
+// Forward declarations (timestamp_ms, cam_id, frame_index = ith capture for that camera, for joining later)
+void save_thermal_tiff_raw(float data[768], int64_t timestamp_ms, int cam_id, int frame_index);
+void save_thermal_tiff_color(cv::Mat &colorFrame, int64_t timestamp_ms, int cam_id, int frame_index);
+void save_thermal_json(float data[768], int64_t timestamp_ms, int cam_id, int frame_index);
 
 static void print_usage(const char *prog) {
     printf("Usage: %s [OPTIONS]\n", prog);
@@ -102,6 +102,8 @@ int main(int argc, char** argv) {
     
     time_t start_time = time(NULL);
     int frame_count = 0;
+    int frame_index_1 = 0;  /* ith image captured on camera 1 (for joining later) */
+    int frame_index_2 = 0;  /* ith image captured on camera 2 */
 
     printf("Starting... Mode: %s (%d cameras on mux ports %d, %d)\n",
            live_only ? "Live Only" : (save_color ? "Save Color" : "Save Raw"), NUM_CAMS, CAM_PORT_1, CAM_PORT_2);
@@ -153,35 +155,35 @@ int main(int argc, char** argv) {
         cv::resize(color2, resized2, cv::Size(640, 480), 0, 0, cv::INTER_CUBIC);
         cv::imshow("Thermal Cam 2", resized2);
 
-        // Saving: both cameras, same timestamp
+        // Saving: both cameras, same timestamp; frame_index lets you join by i later
         if (!live_only) {
             frame_count++;
             if (save_color) {
-                save_thermal_tiff_color(color1, capture_ms, 1);
-                save_thermal_tiff_color(color2, capture_ms, 2);
+                save_thermal_tiff_color(color1, capture_ms, 1, frame_index_1++);
+                save_thermal_tiff_color(color2, capture_ms, 2, frame_index_2++);
             } else {
-                save_thermal_json(mlx90640To1, capture_ms, 1);
-                save_thermal_json(mlx90640To2, capture_ms, 2);
+                save_thermal_json(mlx90640To1, capture_ms, 1, frame_index_1++);
+                save_thermal_json(mlx90640To2, capture_ms, 2, frame_index_2++);
             }
         }
 
         if (cv::waitKey(1) == 27) break;
     }
 
-    printf("\nFinished. Captured %d frames (%d per camera).\n", frame_count, frame_count);
+    printf("\nFinished. Captured %d frames (cam1: %d, cam2: %d).\n", frame_count, frame_index_1, frame_index_2);
     cv::destroyAllWindows();
     return 0;
 }
 
-// Fixed Raw Save (Mapping 1D array to 24x32 scanlines)
-void save_thermal_tiff_raw(float data[768], int64_t timestamp_ms, int cam_id) {
-    char filename[64];
+// Fixed Raw Save (Mapping 1D array to 24x32 scanlines). Name: raw_capture_<cam_id>_<i>_<timestamp>.tif
+void save_thermal_tiff_raw(float data[768], int64_t timestamp_ms, int cam_id, int frame_index) {
+    char filename[80];
 	char meta_time[32];
 	time_t sec = (time_t)(timestamp_ms / 1000);
 	int ms = (int)(timestamp_ms % 1000);
 	struct tm *t = localtime(&sec);
 
-    sprintf(filename, "frames/raw_capture_%d_%lld.tif", cam_id, (long long)timestamp_ms);
+    sprintf(filename, "frames/raw_capture_%d_%d_%lld.tif", cam_id, frame_index, (long long)timestamp_ms);
 	strftime(meta_time, sizeof(meta_time), "%Y:%m:%d %H:%M:%S", t);
 	snprintf(meta_time + strlen(meta_time), sizeof(meta_time) - strlen(meta_time), ".%03d", ms);
 
@@ -204,14 +206,15 @@ void save_thermal_tiff_raw(float data[768], int64_t timestamp_ms, int cam_id) {
     TIFFClose(out);
 }
 
-void save_thermal_tiff_color(cv::Mat &colorFrame, int64_t timestamp_ms, int cam_id) {
-    char filename[64];
+// Name: color_capture_<cam_id>_<i>_<timestamp>.tif
+void save_thermal_tiff_color(cv::Mat &colorFrame, int64_t timestamp_ms, int cam_id, int frame_index) {
+    char filename[80];
 	char meta_time[32];
 	time_t sec = (time_t)(timestamp_ms / 1000);
 	int ms = (int)(timestamp_ms % 1000);
 	struct tm *t = localtime(&sec);
 
-    sprintf(filename, "frames/color_capture_%d_%lld.tif", cam_id, (long long)timestamp_ms);
+    sprintf(filename, "frames/color_capture_%d_%d_%lld.tif", cam_id, frame_index, (long long)timestamp_ms);
 	strftime(meta_time, sizeof(meta_time), "%Y:%m:%d %H:%M:%S", t);
 	snprintf(meta_time + strlen(meta_time), sizeof(meta_time) - strlen(meta_time), ".%03d", ms);
 
@@ -234,8 +237,9 @@ void save_thermal_tiff_color(cv::Mat &colorFrame, int64_t timestamp_ms, int cam_
     TIFFClose(out);
 }
 
-void save_thermal_json(float data[768], int64_t timestamp_ms, int cam_id) {
-    char filename[64];
+// Name: data_capture_<cam_id>_<i>_<timestamp>.json (i = frame index for joining)
+void save_thermal_json(float data[768], int64_t timestamp_ms, int cam_id, int frame_index) {
+    char filename[80];
     char meta_time[32];
 	float avg = 0;
 
@@ -246,8 +250,7 @@ void save_thermal_json(float data[768], int64_t timestamp_ms, int cam_id) {
 	int ms = (int)(timestamp_ms % 1000);
 	struct tm *t = localtime(&sec);
 
-    // Create filename and format timestamp string (ms-precise)
-    sprintf(filename, "frames/data_capture_%d_%lld.json", cam_id, (long long)timestamp_ms);
+    sprintf(filename, "frames/data_capture_%d_%d_%lld.json", cam_id, frame_index, (long long)timestamp_ms);
     strftime(meta_time, sizeof(meta_time), "%Y-%m-%d %T", t);
     snprintf(meta_time + strlen(meta_time), sizeof(meta_time) - strlen(meta_time), ".%03d", ms);
 
@@ -257,9 +260,10 @@ void save_thermal_json(float data[768], int64_t timestamp_ms, int cam_id) {
         return;
     }
 
-    // Start JSON object
+    // Start JSON object (frame_index allows joining by i later)
     fprintf(f, "{\n");
     fprintf(f, "  \"mux_port\": %d,\n", cam_id);
+    fprintf(f, "  \"frame_index\": %d,\n", frame_index);
     fprintf(f, "  \"timestamp\": \"%s\",\n", meta_time);
     fprintf(f, "  \"unix_time\": %ld,\n", (long)sec);
     fprintf(f, "  \"unix_time_ms\": %lld,\n", (long long)timestamp_ms);
