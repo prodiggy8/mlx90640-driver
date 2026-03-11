@@ -1,9 +1,11 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include <signal.h>
 #include <unistd.h>
 #include <time.h>
+#include <sys/time.h>
 #include <getopt.h>
 #include <tiffio.h>
 
@@ -19,10 +21,10 @@ extern "C" {
 bool stop_signal = false;
 void handle_signal(int sig) { stop_signal = true; }
 
-// Forward declarations for your saving functions
-void save_thermal_tiff_raw(float data[768], time_t timestamp);
-void save_thermal_tiff_color(cv::Mat &colorFrame, time_t timestamp);
-void save_thermal_json(float data[768], time_t timestamp);
+// Forward declarations (timestamp_ms = milliseconds since epoch)
+void save_thermal_tiff_raw(float data[768], int64_t timestamp_ms);
+void save_thermal_tiff_color(cv::Mat &colorFrame, int64_t timestamp_ms);
+void save_thermal_json(float data[768], int64_t timestamp_ms);
 
 int main(int argc, char** argv) {
     signal(SIGINT, handle_signal);
@@ -103,14 +105,15 @@ int main(int argc, char** argv) {
 
         // Saving Logic
         if (!live_only) {
-			time_t capture_time = time(NULL);
+			struct timeval tv;
+			gettimeofday(&tv, NULL);
+			int64_t capture_ms = (int64_t)tv.tv_sec * 1000 + (int64_t)(tv.tv_usec / 1000);
 			frame_count++;
-			
 
             if (save_color) {
-                save_thermal_tiff_color(colorFrame, capture_time);
+                save_thermal_tiff_color(colorFrame, capture_ms);
             } else {
-                save_thermal_json(mlx90640To, capture_time);
+                save_thermal_json(mlx90640To, capture_ms);
             }
         }
 
@@ -123,13 +126,16 @@ int main(int argc, char** argv) {
 }
 
 // Fixed Raw Save (Mapping 1D array to 24x32 scanlines)
-void save_thermal_tiff_raw(float data[768], time_t timestamp) {
+void save_thermal_tiff_raw(float data[768], int64_t timestamp_ms) {
     char filename[64];
-	char meta_time[20];
-	struct tm *t = localtime(&timestamp);
+	char meta_time[32];
+	time_t sec = (time_t)(timestamp_ms / 1000);
+	int ms = (int)(timestamp_ms % 1000);
+	struct tm *t = localtime(&sec);
 
-    sprintf(filename, "frames/raw_capture_%ld.tif", (long)timestamp);
+    sprintf(filename, "frames/raw_capture_%lld.tif", (long long)timestamp_ms);
 	strftime(meta_time, sizeof(meta_time), "%Y:%m:%d %H:%M:%S", t);
+	snprintf(meta_time + strlen(meta_time), sizeof(meta_time) - strlen(meta_time), ".%03d", ms);
 
     TIFF *out = TIFFOpen(filename, "w");
     if (!out) return;
@@ -150,13 +156,16 @@ void save_thermal_tiff_raw(float data[768], time_t timestamp) {
     TIFFClose(out);
 }
 
-void save_thermal_tiff_color(cv::Mat &colorFrame, time_t timestamp) {
+void save_thermal_tiff_color(cv::Mat &colorFrame, int64_t timestamp_ms) {
     char filename[64];
-	char meta_time[20];
-	struct tm *t = localtime(&timestamp);
+	char meta_time[32];
+	time_t sec = (time_t)(timestamp_ms / 1000);
+	int ms = (int)(timestamp_ms % 1000);
+	struct tm *t = localtime(&sec);
 
-    sprintf(filename, "frames/color_capture_%ld.tif", (long)timestamp);
+    sprintf(filename, "frames/color_capture_%lld.tif", (long long)timestamp_ms);
 	strftime(meta_time, sizeof(meta_time), "%Y:%m:%d %H:%M:%S", t);
+	snprintf(meta_time + strlen(meta_time), sizeof(meta_time) - strlen(meta_time), ".%03d", ms);
 
     TIFF *out = TIFFOpen(filename, "w");
     if (!out) return;
@@ -177,19 +186,22 @@ void save_thermal_tiff_color(cv::Mat &colorFrame, time_t timestamp) {
     TIFFClose(out);
 }
 
-void save_thermal_json(float data[768], time_t timestamp) {
+void save_thermal_json(float data[768], int64_t timestamp_ms) {
     char filename[64];
-    char meta_time[20];
+    char meta_time[32];
 	float avg = 0;
 
 	for (int i = 0; i < 768; i++) avg += data[i];
 	avg /= 768;	
 
-    struct tm *t = localtime(&timestamp);
+	time_t sec = (time_t)(timestamp_ms / 1000);
+	int ms = (int)(timestamp_ms % 1000);
+	struct tm *t = localtime(&sec);
 
-    // Create filename and format timestamp string
-    sprintf(filename, "frames/data_capture_%ld.json", (long)timestamp);
+    // Create filename and format timestamp string (ms-precise)
+    sprintf(filename, "frames/data_capture_%lld.json", (long long)timestamp_ms);
     strftime(meta_time, sizeof(meta_time), "%Y-%m-%d %T", t);
+    snprintf(meta_time + strlen(meta_time), sizeof(meta_time) - strlen(meta_time), ".%03d", ms);
 
     FILE *f = fopen(filename, "w");
     if (!f) {
@@ -200,7 +212,8 @@ void save_thermal_json(float data[768], time_t timestamp) {
     // Start JSON object
     fprintf(f, "{\n");
     fprintf(f, "  \"timestamp\": \"%s\",\n", meta_time);
-    fprintf(f, "  \"unix_time\": %ld,\n", (long)timestamp);
+    fprintf(f, "  \"unix_time\": %ld,\n", (long)sec);
+    fprintf(f, "  \"unix_time_ms\": %lld,\n", (long long)timestamp_ms);
     fprintf(f, "  \"avg\": %f,\n", avg);
     fprintf(f, "  \"data\": [\n");
 
