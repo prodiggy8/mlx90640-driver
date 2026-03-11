@@ -1,6 +1,6 @@
 /**
  * MLX90640 I2C Driver for Jetson Nano
- * Uses TCA9548A/PCA9548A I2C mux; MLX90640 is on mux port 1.
+ * Uses TCA9548A/PCA9548A I2C mux; cameras on mux ports 1 and 2.
  */
 
 #include <stdio.h>
@@ -16,19 +16,21 @@
 
 #define I2C_DEVICE "/dev/i2c-1"
 #define MUX_ADDR   0x70
-#define MUX_PORT   1   /* fixed port 1 for MLX90640 */
 
 static int i2c_fd = -1;
+static uint8_t current_mux_port = MLX90640_MUX_PORT_1;
 
-/* Select mux port 1 so all subsequent I2C traffic goes to the MLX90640 bus. */
-static int mux_select_port1(void)
+/* Select mux port so subsequent I2C traffic goes to that bus. */
+static int mux_select(uint8_t port)
 {
-    uint8_t port_val = (uint8_t)(1 << MUX_PORT);
+    uint8_t port_val;
     struct i2c_msg msg;
     struct i2c_rdwr_ioctl_data msgset;
 
     if (i2c_fd < 0) return -1;
+    if (port > 7) return -1;
 
+    port_val = (uint8_t)(1 << port);
     msg.addr = MUX_ADDR;
     msg.flags = 0;
     msg.len = 1;
@@ -38,10 +40,16 @@ static int mux_select_port1(void)
     msgset.nmsgs = 1;
 
     if (ioctl(i2c_fd, I2C_RDWR, &msgset) < 0) {
-        fprintf(stderr, "error: mux select port %d failed - %s\n", MUX_PORT, strerror(errno));
+        fprintf(stderr, "error: mux select port %d failed - %s\n", port, strerror(errno));
         return -1;
     }
     return 0;
+}
+
+void MLX90640_I2CSetPort(uint8_t port)
+{
+    if (port <= 7)
+        current_mux_port = port;
 }
 
 void MLX90640_I2CInit(void)
@@ -54,10 +62,11 @@ void MLX90640_I2CInit(void)
         return;
     }
 
-    if (mux_select_port1() != 0) {
-        fprintf(stderr, "error: could not select mux port %d\n", MUX_PORT);
+    current_mux_port = MLX90640_MUX_PORT_1;
+    if (mux_select(current_mux_port) != 0) {
+        fprintf(stderr, "error: could not select mux port %d\n", current_mux_port);
     } else {
-        printf("i2c initialized on %s (mux port %d)\n", I2C_DEVICE, MUX_PORT);
+        printf("i2c initialized on %s (mux ports %d, %d)\n", I2C_DEVICE, MLX90640_MUX_PORT_1, MLX90640_MUX_PORT_2);
     }
 }
 
@@ -70,7 +79,7 @@ void MLX90640_I2CFreqSet(int freq)
 
 int MLX90640_I2CRead(uint8_t slaveAddr, uint16_t startAddress, uint16_t nMemAddressRead, uint16_t *data)
 {
-    if (mux_select_port1() != 0) return -1;
+    if (mux_select(current_mux_port) != 0) return -1;
 
     uint8_t addr_buf[2];
     addr_buf[0] = startAddress >> 8;
@@ -111,7 +120,7 @@ int MLX90640_I2CRead(uint8_t slaveAddr, uint16_t startAddress, uint16_t nMemAddr
 
 int MLX90640_I2CWrite(uint8_t slaveAddr, uint16_t writeAddress, uint16_t data)
 {
-    if (mux_select_port1() != 0) return -1;
+    if (mux_select(current_mux_port) != 0) return -1;
 
     uint8_t tx_buf[4];
     uint16_t dataCheck;
@@ -151,7 +160,7 @@ int MLX90640_I2CWrite(uint8_t slaveAddr, uint16_t writeAddress, uint16_t data)
 
 int MLX90640_I2CGeneralReset(void)
 {
-    if (mux_select_port1() != 0) return -1;
+    if (mux_select(current_mux_port) != 0) return -1;
 
     uint8_t reset_cmd = 0x06;
     struct i2c_msg msg;

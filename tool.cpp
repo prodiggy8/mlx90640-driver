@@ -18,13 +18,28 @@ extern "C" {
 
 #define MLX_ADDR 0x33
 
+/* Mux ports for the two cameras (must match MLX90640_I2C_Driver.h) */
+static const uint8_t CAM_PORT_1 = MLX90640_MUX_PORT_1;
+static const uint8_t CAM_PORT_2 = MLX90640_MUX_PORT_2;
+static const int NUM_CAMS = 2;
+
 bool stop_signal = false;
 void handle_signal(int sig) { stop_signal = true; }
 
-// Forward declarations (timestamp_ms = milliseconds since epoch)
-void save_thermal_tiff_raw(float data[768], int64_t timestamp_ms);
-void save_thermal_tiff_color(cv::Mat &colorFrame, int64_t timestamp_ms);
-void save_thermal_json(float data[768], int64_t timestamp_ms);
+// Forward declarations (timestamp_ms = milliseconds since epoch, cam_id = 1 or 2 for filename)
+void save_thermal_tiff_raw(float data[768], int64_t timestamp_ms, int cam_id);
+void save_thermal_tiff_color(cv::Mat &colorFrame, int64_t timestamp_ms, int cam_id);
+void save_thermal_json(float data[768], int64_t timestamp_ms, int cam_id);
+
+static void print_usage(const char *prog) {
+    printf("Usage: %s [OPTIONS]\n", prog);
+    printf("Capture from two MLX90640 thermal cameras on I2C mux ports 1 and 2.\n\n");
+    printf("Options:\n");
+    printf("  -s, --seconds N   Run for N seconds then exit (default: run until Ctrl+C)\n");
+    printf("  -c, --color      Save color TIFF images (default: save raw JSON)\n");
+    printf("  -l, --live       Live view only, do not save to disk\n");
+    printf("  -h, --help       Show this help and exit\n");
+}
 
 int main(int argc, char** argv) {
     signal(SIGINT, handle_signal);
@@ -41,14 +56,24 @@ int main(int argc, char** argv) {
     bool live_only = false;  // -l
     int opt;
 
-    // Parse CLI arguments
-    while ((opt = getopt(argc, argv, "s:cl")) != -1) {
+    static const struct option long_options[] = {
+        { "seconds", required_argument, 0, 's' },
+        { "color",   no_argument,       0, 'c' },
+        { "live",    no_argument,       0, 'l' },
+        { "help",    no_argument,       0, 'h' },
+        { 0, 0, 0, 0 }
+    };
+
+    while ((opt = getopt_long(argc, argv, "s:clh", long_options, NULL)) != -1) {
         switch (opt) {
             case 's': seconds = atoi(optarg); break;
             case 'c': save_color = true; break;
             case 'l': live_only = true; break;
+            case 'h':
+                print_usage(argv[0]);
+                return 0;
             default:
-                fprintf(stderr, "Usage: %s [-s seconds] [-c] [-l]\n", argv[0]);
+                fprintf(stderr, "Try '%s --help' for more information.\n", argv[0]);
                 return -1;
         }
     }
@@ -57,21 +82,29 @@ int main(int argc, char** argv) {
     MLX90640_I2CInit();
     MLX90640_I2CFreqSet(400);
 
-    static uint16_t eeData[832];
-    static uint16_t frameData[834];
-    static float mlx90640To[768];
-    paramsMLX90640 params;
+    static uint16_t eeData1[832], eeData2[832];
+    static uint16_t frameData1[834], frameData2[834];
+    static float mlx90640To1[768], mlx90640To2[768];
+    paramsMLX90640 params1, params2;
 
-    if (MLX90640_DumpEE(MLX_ADDR, eeData) != 0) return -1;
-    MLX90640_ExtractParameters(eeData, &params);
+    MLX90640_I2CSetPort(CAM_PORT_1);
+    if (MLX90640_DumpEE(MLX_ADDR, eeData1) != 0) return -1;
+    MLX90640_ExtractParameters(eeData1, &params1);
     MLX90640_SetRefreshRate(MLX_ADDR, 0x03); // 4Hz
 
-    cv::namedWindow("Thermal Cam", cv::WINDOW_NORMAL);
+    MLX90640_I2CSetPort(CAM_PORT_2);
+    if (MLX90640_DumpEE(MLX_ADDR, eeData2) != 0) return -1;
+    MLX90640_ExtractParameters(eeData2, &params2);
+    MLX90640_SetRefreshRate(MLX_ADDR, 0x03); // 4Hz
+
+    cv::namedWindow("Thermal Cam 1", cv::WINDOW_NORMAL);
+    cv::namedWindow("Thermal Cam 2", cv::WINDOW_NORMAL);
     
     time_t start_time = time(NULL);
     int frame_count = 0;
 
-    printf("Starting... Mode: %s\n", live_only ? "Live Only" : (save_color ? "Save Color" : "Save Raw"));
+    printf("Starting... Mode: %s (%d cameras on mux ports %d, %d)\n",
+           live_only ? "Live Only" : (save_color ? "Save Color" : "Save Raw"), NUM_CAMS, CAM_PORT_1, CAM_PORT_2);
 
     while (!stop_signal) {
         // Check duration if -s was set
@@ -82,58 +115,73 @@ int main(int argc, char** argv) {
 		// CRITICAL SECTION
 		sigprocmask(SIG_BLOCK, &x, &old_x);
 
-        if (MLX90640_GetFrameData(MLX_ADDR, frameData) >= 0) {
-			float Ta = MLX90640_GetTa(frameData, &params);
-			MLX90640_CalculateTo(frameData, &params, 0.95, Ta - 8.0, mlx90640To);
-		} else {
-			continue;
-		}
+        MLX90640_I2CSetPort(CAM_PORT_1);
+        int ok1 = MLX90640_GetFrameData(MLX_ADDR, frameData1);
+        MLX90640_I2CSetPort(CAM_PORT_2);
+        int ok2 = MLX90640_GetFrameData(MLX_ADDR, frameData2);
 
 		sigprocmask(SIG_SETMASK, &old_x, NULL);
 
-        // Map to OpenCV
-        cv::Mat frame(24, 32, CV_32FC1, mlx90640To);
-        double minT, maxT;
-        cv::minMaxLoc(frame, &minT, &maxT);
+        if (ok1 < 0 || ok2 < 0) continue;
 
-        cv::Mat normalized, colorFrame, resized;
-        frame.convertTo(normalized, CV_8UC1, 255.0 / (maxT - minT), -minT * 255.0 / (maxT - minT));
-        cv::applyColorMap(normalized, colorFrame, cv::COLORMAP_JET);
-        cv::resize(colorFrame, resized, cv::Size(640, 480), 0, 0, cv::INTER_CUBIC);
+        float Ta1 = MLX90640_GetTa(frameData1, &params1);
+        MLX90640_CalculateTo(frameData1, &params1, 0.95, Ta1 - 8.0, mlx90640To1);
+        float Ta2 = MLX90640_GetTa(frameData2, &params2);
+        MLX90640_CalculateTo(frameData2, &params2, 0.95, Ta2 - 8.0, mlx90640To2);
 
-        cv::imshow("Thermal Cam", resized);
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        int64_t capture_ms = (int64_t)tv.tv_sec * 1000 + (int64_t)(tv.tv_usec / 1000);
 
-        // Saving Logic
+        // Camera 1 -> window 1
+        cv::Mat frame1(24, 32, CV_32FC1, mlx90640To1);
+        double minT1, maxT1;
+        cv::minMaxLoc(frame1, &minT1, &maxT1);
+        cv::Mat norm1, color1, resized1;
+        frame1.convertTo(norm1, CV_8UC1, 255.0 / (maxT1 - minT1), -minT1 * 255.0 / (maxT1 - minT1));
+        cv::applyColorMap(norm1, color1, cv::COLORMAP_JET);
+        cv::resize(color1, resized1, cv::Size(640, 480), 0, 0, cv::INTER_CUBIC);
+        cv::imshow("Thermal Cam 1", resized1);
+
+        // Camera 2 -> window 2
+        cv::Mat frame2(24, 32, CV_32FC1, mlx90640To2);
+        double minT2, maxT2;
+        cv::minMaxLoc(frame2, &minT2, &maxT2);
+        cv::Mat norm2, color2, resized2;
+        frame2.convertTo(norm2, CV_8UC1, 255.0 / (maxT2 - minT2), -minT2 * 255.0 / (maxT2 - minT2));
+        cv::applyColorMap(norm2, color2, cv::COLORMAP_JET);
+        cv::resize(color2, resized2, cv::Size(640, 480), 0, 0, cv::INTER_CUBIC);
+        cv::imshow("Thermal Cam 2", resized2);
+
+        // Saving: both cameras, same timestamp
         if (!live_only) {
-			struct timeval tv;
-			gettimeofday(&tv, NULL);
-			int64_t capture_ms = (int64_t)tv.tv_sec * 1000 + (int64_t)(tv.tv_usec / 1000);
-			frame_count++;
-
+            frame_count++;
             if (save_color) {
-                save_thermal_tiff_color(colorFrame, capture_ms);
+                save_thermal_tiff_color(color1, capture_ms, 1);
+                save_thermal_tiff_color(color2, capture_ms, 2);
             } else {
-                save_thermal_json(mlx90640To, capture_ms);
+                save_thermal_json(mlx90640To1, capture_ms, 1);
+                save_thermal_json(mlx90640To2, capture_ms, 2);
             }
         }
 
         if (cv::waitKey(1) == 27) break;
     }
 
-    printf("\nFinished. Captured %d frames.\n", frame_count);
+    printf("\nFinished. Captured %d frames (%d per camera).\n", frame_count, frame_count);
     cv::destroyAllWindows();
     return 0;
 }
 
 // Fixed Raw Save (Mapping 1D array to 24x32 scanlines)
-void save_thermal_tiff_raw(float data[768], int64_t timestamp_ms) {
+void save_thermal_tiff_raw(float data[768], int64_t timestamp_ms, int cam_id) {
     char filename[64];
 	char meta_time[32];
 	time_t sec = (time_t)(timestamp_ms / 1000);
 	int ms = (int)(timestamp_ms % 1000);
 	struct tm *t = localtime(&sec);
 
-    sprintf(filename, "frames/raw_capture_%lld.tif", (long long)timestamp_ms);
+    sprintf(filename, "frames/raw_capture_%d_%lld.tif", cam_id, (long long)timestamp_ms);
 	strftime(meta_time, sizeof(meta_time), "%Y:%m:%d %H:%M:%S", t);
 	snprintf(meta_time + strlen(meta_time), sizeof(meta_time) - strlen(meta_time), ".%03d", ms);
 
@@ -156,14 +204,14 @@ void save_thermal_tiff_raw(float data[768], int64_t timestamp_ms) {
     TIFFClose(out);
 }
 
-void save_thermal_tiff_color(cv::Mat &colorFrame, int64_t timestamp_ms) {
+void save_thermal_tiff_color(cv::Mat &colorFrame, int64_t timestamp_ms, int cam_id) {
     char filename[64];
 	char meta_time[32];
 	time_t sec = (time_t)(timestamp_ms / 1000);
 	int ms = (int)(timestamp_ms % 1000);
 	struct tm *t = localtime(&sec);
 
-    sprintf(filename, "frames/color_capture_%lld.tif", (long long)timestamp_ms);
+    sprintf(filename, "frames/color_capture_%d_%lld.tif", cam_id, (long long)timestamp_ms);
 	strftime(meta_time, sizeof(meta_time), "%Y:%m:%d %H:%M:%S", t);
 	snprintf(meta_time + strlen(meta_time), sizeof(meta_time) - strlen(meta_time), ".%03d", ms);
 
@@ -186,7 +234,7 @@ void save_thermal_tiff_color(cv::Mat &colorFrame, int64_t timestamp_ms) {
     TIFFClose(out);
 }
 
-void save_thermal_json(float data[768], int64_t timestamp_ms) {
+void save_thermal_json(float data[768], int64_t timestamp_ms, int cam_id) {
     char filename[64];
     char meta_time[32];
 	float avg = 0;
@@ -199,7 +247,7 @@ void save_thermal_json(float data[768], int64_t timestamp_ms) {
 	struct tm *t = localtime(&sec);
 
     // Create filename and format timestamp string (ms-precise)
-    sprintf(filename, "frames/data_capture_%lld.json", (long long)timestamp_ms);
+    sprintf(filename, "frames/data_capture_%d_%lld.json", cam_id, (long long)timestamp_ms);
     strftime(meta_time, sizeof(meta_time), "%Y-%m-%d %T", t);
     snprintf(meta_time + strlen(meta_time), sizeof(meta_time) - strlen(meta_time), ".%03d", ms);
 
@@ -211,6 +259,7 @@ void save_thermal_json(float data[768], int64_t timestamp_ms) {
 
     // Start JSON object
     fprintf(f, "{\n");
+    fprintf(f, "  \"mux_port\": %d,\n", cam_id);
     fprintf(f, "  \"timestamp\": \"%s\",\n", meta_time);
     fprintf(f, "  \"unix_time\": %ld,\n", (long)sec);
     fprintf(f, "  \"unix_time_ms\": %lld,\n", (long long)timestamp_ms);
