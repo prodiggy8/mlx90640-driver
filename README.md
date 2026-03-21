@@ -1,6 +1,6 @@
 ### mlx90640 jetson driver
 
-this is a c++ driver for the mlx90640 thermal sensor on jetson nano. it uses opencv for live display and libtiff to save high-precision temperature data.
+this is a c++ driver for the mlx90640 thermal sensors over the TCA9548A I2C mux. it uses opencv for live display and libtiff to save full precision temperature data.
 
 #### setup
 
